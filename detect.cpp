@@ -37,6 +37,17 @@ namespace yolo
     {
         std::shared_ptr<ov::Model> model = ov_core.read_model(model_path);
 
+        // Get input shape from the model
+        const std::vector<ov::Output<ov::Node>> inputs = model->inputs();
+        const ov::PartialShape input_shape = inputs[0].get_partial_shape();
+        if (input_shape[2].is_static() && input_shape[3].is_static())
+        {
+            m_model_input_shape = cv::Size(static_cast<int>(input_shape[3].get_length()), static_cast<int>(input_shape[2].get_length()));
+        }
+
+        // Support dynamic shapes
+        model->reshape({1, 3, ov::Dimension(), ov::Dimension()});
+
         try
         {
             m_compiled_model = ov_core.compile_model(model, "CPU");
@@ -57,13 +68,6 @@ namespace yolo
             std::cerr << "Caught Unknown exception " << std::endl;
             return UNKNOWN_ERROR;
         }
-
-        // Get input shape from the model
-        const std::vector<ov::Output<ov::Node>> inputs = model->inputs();
-        const ov::Shape input_shape = inputs[0].get_shape();
-        auto height = input_shape[2];
-        auto width = input_shape[3];
-        m_model_input_shape = cv::Size(static_cast<int>(width), static_cast<int>(height));
 
         setupModelOutputShape(model);
         return SUCCESS;
@@ -104,40 +108,34 @@ namespace yolo
     // Method to preprocess the input frame
     void Detector::preProcessing(const cv::Mat &frame)
     {
-        if (m_model_input_shape.width == m_model_input_shape.height && m_keep_ratio)
+        int target_w = m_model_input_shape.width;
+        int target_h = m_model_input_shape.height;
+
+        if (m_keep_ratio)
         {
-            // letterbox
-            float col = static_cast<float>(frame.cols);
-            float row = static_cast<float>(frame.rows);
-            float scale = std::min(m_model_input_shape.width / col, m_model_input_shape.height / row);
-            m_scale_factor.x = 1.0f / scale;
-            m_scale_factor.y = 1.0f / scale;
-            int resized_w = static_cast<int>(col * scale);
-            int resized_h = static_cast<int>(row * scale);
-            m_input_resized_roi = cv::Rect(0, 0, resized_w, resized_h);
-            auto bg_color = mode_color(frame);
-            cv::resize(frame, m_resized_frame, cv::Size(resized_w, resized_h), 0, 0, cv::INTER_AREA);
-            cv::copyMakeBorder(m_resized_frame,
-                               m_resized_frame,
-                               0, m_model_input_shape.height - resized_h,
-                               0, m_model_input_shape.width - resized_w,
-                               cv::BORDER_CONSTANT,
-                               bg_color);
+            float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
+            target_w = static_cast<int>(std::round(frame.cols * scale / 32) * 32);
+            target_h = static_cast<int>(std::round(frame.rows * scale / 32) * 32);
         }
-        else
-        {
-            cv::resize(frame, m_resized_frame, m_model_input_shape, 0, 0, cv::INTER_AREA);
-            m_scale_factor.x = static_cast<float>(frame.cols) / m_model_input_shape.width;
-            m_scale_factor.y = static_cast<float>(frame.rows) / m_model_input_shape.height;
-            m_input_resized_roi = cv::Rect(cv::Point{0, 0}, m_model_input_shape);
-        }
+        if (target_w < 32)
+            target_w = 32;
+        if (target_h < 32)
+            target_h = 32;
+
+        cv::resize(frame, m_resized_frame, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
+        m_scale_factor.x = static_cast<float>(frame.cols) / target_w;
+        m_scale_factor.y = static_cast<float>(frame.rows) / target_h;
+        m_input_resized_roi = cv::Rect(0, 0, target_w, target_h);
+
         if (!m_resized_frame.isContinuous())
             m_resized_frame = m_resized_frame.clone();
 
         cv::dnn::blobFromImage(m_resized_frame, m_input_blob, 1.0 / 255.0, cv::Size(), cv::Scalar(), true);
 
         float *input_data = (float *)m_input_blob.data;
-        m_input_tensor = ov::Tensor(m_compiled_model.input().get_element_type(), m_compiled_model.input().get_shape(), input_data);
+        auto blob_size = m_input_blob.size;
+        ov::Shape input_shape = {static_cast<size_t>(blob_size[0]), static_cast<size_t>(blob_size[1]), static_cast<size_t>(blob_size[2]), static_cast<size_t>(blob_size[3])};
+        m_input_tensor = ov::Tensor(m_compiled_model.input().get_element_type(), input_shape, input_data);
         m_inference_request.set_input_tensor(m_input_tensor);
     }
 
@@ -161,11 +159,15 @@ namespace yolo
         // Get the output tensor from the inference request
 
         ov::Tensor dets_tensor = m_inference_request.get_output_tensor(0);
+        auto dets_shape = dets_tensor.get_shape();
+        m_model_output_shape_det = cv::Size(static_cast<int>(dets_shape[2]), static_cast<int>(dets_shape[1]));
         const float *detections = dets_tensor.data<const float>();
         cv::Mat detection_outputs(m_model_output_shape_det, CV_32F, const_cast<float *>(detections));
         detection_outputs = detection_outputs.clone();
 
         ov::Tensor segs_tensor = m_inference_request.get_output_tensor(1);
+        auto segs_shape = segs_tensor.get_shape();
+        m_model_output_shape_seg = cv::Size(static_cast<int>(segs_shape[3]), static_cast<int>(segs_shape[2]));
         const float *segments = segs_tensor.data<const float>();
         cv::Mat segment_outputs(m_segment_channel, m_model_output_shape_seg.area(), CV_32F, const_cast<float *>(segments));
         segment_outputs = segment_outputs.clone();
@@ -278,11 +280,18 @@ namespace yolo
     void Detector::setupModelOutputShape(std::shared_ptr<const ov::Model> model)
     {
         auto outputs = model->outputs();
-        auto output_shape = outputs[0].get_shape();
-        m_model_output_shape_det = cv::Size(static_cast<int>(*(output_shape.rbegin())), static_cast<int>(*(output_shape.rbegin() + 1)));
+        auto output_shape0 = outputs[0].get_partial_shape();
+        int det_h = output_shape0[1].is_static() ? static_cast<int>(output_shape0[1].get_length()) : 0;
+        int det_w = output_shape0[2].is_static() ? static_cast<int>(output_shape0[2].get_length()) : 0;
+        m_model_output_shape_det = cv::Size(det_w, det_h);
 
-        output_shape = outputs[1].get_shape();
-        m_model_output_shape_seg = cv::Size(static_cast<int>(*(output_shape.rbegin())), static_cast<int>(*(output_shape.rbegin() + 1)));
+        if (outputs.size() > 1)
+        {
+            auto output_shape1 = outputs[1].get_partial_shape();
+            int seg_h = output_shape1[2].is_static() ? static_cast<int>(output_shape1[2].get_length()) : 0;
+            int seg_w = output_shape1[3].is_static() ? static_cast<int>(output_shape1[3].get_length()) : 0;
+            m_model_output_shape_seg = cv::Size(seg_w, seg_h);
+        }
     }
 
     // Method to get the bounding box in the correct scale
