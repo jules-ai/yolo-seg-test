@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
         fs::create_directories(output_dir);
     }
 
-    // Default to RECT mode as specified in detect.h
-    yolo::Detector detector(0.25f, 0.45f, 640);
+    // Default parameters: 0.45 confidence, 0.6 NMS, 1280 imgsz, RECT mode
+    yolo::Detector detector(0.45f, 0.6f, 1280);
     if (detector.InitVino(model_path) != yolo::SUCCESS) {
         std::cerr << "Failed to initialize detector with model: " << model_path << std::endl;
         return -1;
@@ -59,7 +59,13 @@ int main(int argc, char** argv) {
                     int thickness = std::max(1, static_cast<int>(frame.cols / 300));
                     double font_scale = frame.cols / 1000.0;
 
+                    int photo_count = 0;
+                    int layout_count = 0;
+
                     for (const auto& res : results) {
+                        if (res.class_id == yolo::Detector::PHOTO) photo_count++;
+                        else if (res.class_id == yolo::Detector::LAYOUT) layout_count++;
+
                         cv::Scalar color = colors[res.class_id % colors.size()];
 
                         // Draw semi-transparent mask
@@ -83,7 +89,7 @@ int main(int argc, char** argv) {
                     std::string filename = entry.path().filename().string();
                     std::string out_path = (fs::path(output_dir) / filename).string();
                     cv::imwrite(out_path, canvas);
-                    std::cout << "Processed: " << path << " -> " << out_path << std::endl;
+                    std::cout << "Processed: [P" << photo_count << " L" << layout_count << "] " << path << " -> " << out_path << std::endl;
                 } else {
                     std::cerr << "Inference failed for: " << path << std::endl;
                 }
