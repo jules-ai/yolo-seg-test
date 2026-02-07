@@ -52,8 +52,8 @@ namespace yolo
             RECT,
         };
 
-        Detector(float confidence_threshold, float NMS_threshold, int imgsz, PreprocessingMethod method = PreprocessingMethod::LETTERBOX);
-        Detector(float confidence_threshold, float NMS_threshold, cv::Size input_shape = cv::Size(640, 640), PreprocessingMethod method = PreprocessingMethod::LETTERBOX);
+        Detector(float confidence_threshold, float NMS_threshold, int imgsz, PreprocessingMethod method = PreprocessingMethod::RECT);
+        Detector(float confidence_threshold, float NMS_threshold, cv::Size input_shape = cv::Size(640, 640), PreprocessingMethod method = PreprocessingMethod::RECT);
         ~Detector() = default;
 
         int InitVino(const std::string &model_path);
@@ -72,11 +72,12 @@ namespace yolo
         ov::CompiledModel m_compiled_model;
 
         cv::Size m_model_input_shape;
+        cv::Point2i m_pad;
         cv::Rect2d m_input_resized_roi;
         cv::Size m_model_output_shape_det;
         cv::Size m_model_output_shape_seg;
         cv::Point2f m_scale_factor;
-        constexpr static int m_segment_channel = 32;
+        int m_segment_channel{32};
 
         cv::Mat m_resized_frame;
         cv::Mat m_input_blob;

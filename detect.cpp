@@ -104,38 +104,50 @@ namespace yolo
     {
         int target_w = m_model_input_shape.width;
         int target_h = m_model_input_shape.height;
+        m_pad = cv::Point2i(0, 0);
 
         if (m_preprocessing_method == PreprocessingMethod::RECT)
         {
             float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
-            target_w = static_cast<int>(std::round(frame.cols * scale / 32) * 32);
-            target_h = static_cast<int>(std::round(frame.rows * scale / 32) * 32);
-            if (target_w < 32)
-                target_w = 32;
-            if (target_h < 32)
-                target_h = 32;
+            int resized_w = static_cast<int>(std::round(frame.cols * scale));
+            int resized_h = static_cast<int>(std::round(frame.rows * scale));
 
-            cv::resize(frame, m_resized_frame, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
-            m_scale_factor.x = static_cast<float>(frame.cols) / target_w;
-            m_scale_factor.y = static_cast<float>(frame.rows) / target_h;
-            m_input_resized_roi = cv::Rect(0, 0, target_w, target_h);
-        }
-        else if (m_preprocessing_method == PreprocessingMethod::LETTERBOX)
-        {
-            float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
-            int resized_w = static_cast<int>(frame.cols * scale);
-            int resized_h = static_cast<int>(frame.rows * scale);
+            target_w = (resized_w + 31) / 32 * 32;
+            target_h = (resized_h + 31) / 32 * 32;
 
             cv::Mat resized;
             cv::resize(frame, resized, cv::Size(resized_w, resized_h), 0, 0, cv::INTER_AREA);
 
+            m_pad.x = (target_w - resized_w) / 2;
+            m_pad.y = (target_h - resized_h) / 2;
+
             auto bg_color = mode_color(frame);
             m_resized_frame = cv::Mat(cv::Size(target_w, target_h), frame.type(), bg_color);
-            resized.copyTo(m_resized_frame(cv::Rect(0, 0, resized_w, resized_h)));
+            resized.copyTo(m_resized_frame(cv::Rect(m_pad.x, m_pad.y, resized_w, resized_h)));
+
+            m_scale_factor.x = static_cast<float>(frame.cols) / resized_w;
+            m_scale_factor.y = static_cast<float>(frame.rows) / resized_h;
+            m_input_resized_roi = cv::Rect(m_pad.x, m_pad.y, resized_w, resized_h);
+        }
+        else if (m_preprocessing_method == PreprocessingMethod::LETTERBOX)
+        {
+            float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
+            int resized_w = static_cast<int>(std::round(frame.cols * scale));
+            int resized_h = static_cast<int>(std::round(frame.rows * scale));
+
+            cv::Mat resized;
+            cv::resize(frame, resized, cv::Size(resized_w, resized_h), 0, 0, cv::INTER_AREA);
+
+            m_pad.x = (target_w - resized_w) / 2;
+            m_pad.y = (target_h - resized_h) / 2;
+
+            auto bg_color = mode_color(frame);
+            m_resized_frame = cv::Mat(cv::Size(target_w, target_h), frame.type(), bg_color);
+            resized.copyTo(m_resized_frame(cv::Rect(m_pad.x, m_pad.y, resized_w, resized_h)));
 
             m_scale_factor.x = 1.0f / scale;
             m_scale_factor.y = 1.0f / scale;
-            m_input_resized_roi = cv::Rect(0, 0, resized_w, resized_h);
+            m_input_resized_roi = cv::Rect(m_pad.x, m_pad.y, resized_w, resized_h);
         }
         else // RESIZE
         {
@@ -157,15 +169,6 @@ namespace yolo
         m_inference_request.set_input_tensor(m_input_tensor);
     }
 
-    inline size_t get_top_idx_from_3(const std::vector<float> &scores)
-    {
-        size_t top_idx = 0;
-        if (scores[1] > scores[top_idx])
-            top_idx = 1;
-        if (scores[2] > scores[top_idx])
-            top_idx = 2;
-        return top_idx;
-    }
     // Method to postprocess the inference results
     std::vector<Detector::Result> Detector::postProcessing(const cv::Mat &frame, Order order)
     {
@@ -183,17 +186,34 @@ namespace yolo
         cv::Mat detection_outputs(m_model_output_shape_det, CV_32F, const_cast<float *>(detections));
         detection_outputs = detection_outputs.clone();
 
-        ov::Tensor segs_tensor = m_inference_request.get_output_tensor(1);
-        auto segs_shape = segs_tensor.get_shape();
-        m_model_output_shape_seg = cv::Size(static_cast<int>(segs_shape[3]), static_cast<int>(segs_shape[2]));
-        const float *segments = segs_tensor.data<const float>();
-        cv::Mat segment_outputs(m_segment_channel, m_model_output_shape_seg.area(), CV_32F, const_cast<float *>(segments));
-        segment_outputs = segment_outputs.clone();
+        int classes_num = m_model_output_shape_det.height - 4;
+        bool has_seg = false;
+        cv::Mat segment_outputs;
+        try {
+            ov::Tensor segs_tensor = m_inference_request.get_output_tensor(1);
+            auto segs_shape = segs_tensor.get_shape();
+            m_model_output_shape_seg = cv::Size(static_cast<int>(segs_shape[3]), static_cast<int>(segs_shape[2]));
+            m_segment_channel = static_cast<int>(segs_shape[1]);
+            const float *segments = segs_tensor.data<const float>();
+            segment_outputs = cv::Mat(m_segment_channel, m_model_output_shape_seg.area(), CV_32F, const_cast<float *>(segments));
+            segment_outputs = segment_outputs.clone();
+            classes_num -= m_segment_channel;
+            has_seg = true;
+        } catch (...) {
+            has_seg = false;
+        }
+
         for (int i = 0; i < m_model_output_shape_det.width; ++i)
         {
-            std::vector<float> class_scores{detection_outputs.at<float>(4, i), detection_outputs.at<float>(5, i), detection_outputs.at<float>(6, i)};
-            auto class_id = get_top_idx_from_3(class_scores);
-            auto score = class_scores.at(class_id);
+            float score = 0;
+            int class_id = -1;
+            for (int j = 0; j < classes_num; ++j) {
+                float s = detection_outputs.at<float>(4 + j, i);
+                if (s > score) {
+                    score = s;
+                    class_id = j;
+                }
+            }
 
             // Check if the detection meets the confidence threshold
             if (score > m_confidence_threshold)
@@ -231,27 +251,31 @@ namespace yolo
         {
             const auto id = NMS_ids[i];
             results.emplace_back(class_list[id], confidence_list[id], scaleBoundingBox(box_list[id]) & cv::Rect(0, 0, frame.cols, frame.rows));
-            mask_coefs.emplace_back(detection_outputs.col(original_index[id]).rowRange(m_model_output_shape_det.height - m_segment_channel, m_model_output_shape_det.height).t());
+            if (has_seg)
+                mask_coefs.emplace_back(detection_outputs.col(original_index[id]).rowRange(m_model_output_shape_det.height - m_segment_channel, m_model_output_shape_det.height).t());
         }
-        cv::Mat mask_coef_mat;
-        cv::vconcat(mask_coefs, mask_coef_mat);
-        cv::Mat masks = mask_coef_mat * segment_outputs;
 
-        float seg_scale_x = static_cast<float>(m_model_output_shape_seg.width) / m_resized_frame.cols;
-        float seg_scale_y = static_cast<float>(m_model_output_shape_seg.height) / m_resized_frame.rows;
-        auto roi_seg = cv::Rect(
-            static_cast<int>(m_input_resized_roi.x * seg_scale_x),
-            static_cast<int>(m_input_resized_roi.y * seg_scale_y),
-            static_cast<int>(m_input_resized_roi.width * seg_scale_x),
-            static_cast<int>(m_input_resized_roi.height * seg_scale_y));
-        for (int i = 0; i < NMS_ids.size(); ++i)
-        {
-            cv::Mat mask(m_model_output_shape_seg, CV_32FC1, (float *)masks.data + i * m_model_output_shape_seg.area());
-            cv::Mat fmask;
-            cv::resize(mask(roi_seg), fmask, frame.size(), 0, 0, cv::INTER_CUBIC);
-            cv::Mat pure = cv::Mat::zeros(fmask.size(), fmask.type());
-            fmask(results[i].box).copyTo(pure(results[i].box));
-            cv::compare(pure, 0, results[i].mask, cv::CMP_GT);
+        if (has_seg && !mask_coefs.empty()) {
+            cv::Mat mask_coef_mat;
+            cv::vconcat(mask_coefs, mask_coef_mat);
+            cv::Mat masks = mask_coef_mat * segment_outputs;
+
+            float seg_scale_x = static_cast<float>(m_model_output_shape_seg.width) / m_resized_frame.cols;
+            float seg_scale_y = static_cast<float>(m_model_output_shape_seg.height) / m_resized_frame.rows;
+            auto roi_seg = cv::Rect(
+                static_cast<int>(m_input_resized_roi.x * seg_scale_x),
+                static_cast<int>(m_input_resized_roi.y * seg_scale_y),
+                static_cast<int>(m_input_resized_roi.width * seg_scale_x),
+                static_cast<int>(m_input_resized_roi.height * seg_scale_y));
+            for (int i = 0; i < NMS_ids.size(); ++i)
+            {
+                cv::Mat mask(m_model_output_shape_seg, CV_32FC1, (float *)masks.data + i * m_model_output_shape_seg.area());
+                cv::Mat fmask;
+                cv::resize(mask(roi_seg), fmask, frame.size(), 0, 0, cv::INTER_CUBIC);
+                cv::Mat pure = cv::Mat::zeros(fmask.size(), fmask.type());
+                fmask(results[i].box).copyTo(pure(results[i].box));
+                cv::compare(pure, 0, results[i].mask, cv::CMP_GT);
+            }
         }
 
         switch (order)
@@ -299,6 +323,8 @@ namespace yolo
         if (outputs.size() > 1)
         {
             auto output_shape1 = outputs[1].get_partial_shape();
+            if (output_shape1[1].is_static())
+                m_segment_channel = static_cast<int>(output_shape1[1].get_length());
             int seg_h = output_shape1[2].is_static() ? static_cast<int>(output_shape1[2].get_length()) : 0;
             int seg_w = output_shape1[3].is_static() ? static_cast<int>(output_shape1[3].get_length()) : 0;
             m_model_output_shape_seg = cv::Size(seg_w, seg_h);
@@ -308,11 +334,11 @@ namespace yolo
     // Method to get the bounding box in the correct scale
     cv::Rect Detector::scaleBoundingBox(const cv::Rect2d &src) const
     {
-        cv::Rect box = src;
-        box.x = static_cast<int>(std::round(box.x * m_scale_factor.x));
-        box.y = static_cast<int>(std::round(box.y * m_scale_factor.y));
-        box.width = static_cast<int>(std::round(box.width * m_scale_factor.x));
-        box.height = static_cast<int>(std::round(box.height * m_scale_factor.y));
+        cv::Rect box;
+        box.x = static_cast<int>(std::round((src.x - m_pad.x) * m_scale_factor.x));
+        box.y = static_cast<int>(std::round((src.y - m_pad.y) * m_scale_factor.y));
+        box.width = static_cast<int>(std::round(src.width * m_scale_factor.x));
+        box.height = static_cast<int>(std::round(src.height * m_scale_factor.y));
         return box;
     }
 } // namespace yolo
