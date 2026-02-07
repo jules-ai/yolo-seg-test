@@ -112,8 +112,8 @@ namespace yolo
             int resized_w = static_cast<int>(std::round(frame.cols * scale));
             int resized_h = static_cast<int>(std::round(frame.rows * scale));
 
-            target_w = (resized_w + 31) / 32 * 32;
-            target_h = (resized_h + 31) / 32 * 32;
+            target_w = (resized_w + m_stride - 1) / m_stride * m_stride;
+            target_h = (resized_h + m_stride - 1) / m_stride * m_stride;
 
             cv::Mat resized;
             cv::resize(frame, resized, cv::Size(resized_w, resized_h), 0, 0, cv::INTER_AREA);

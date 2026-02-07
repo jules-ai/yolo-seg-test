@@ -55,6 +55,10 @@ int main(int argc, char** argv) {
                 std::vector<yolo::Detector::Result> results;
                 if (detector.Detect(frame, results) == yolo::SUCCESS) {
                     cv::Mat canvas = frame.clone();
+
+                    int thickness = std::max(1, static_cast<int>(frame.cols / 300));
+                    double font_scale = frame.cols / 1000.0;
+
                     for (const auto& res : results) {
                         cv::Scalar color = colors[res.class_id % colors.size()];
 
@@ -66,14 +70,14 @@ int main(int argc, char** argv) {
                         }
 
                         // Draw bounding box
-                        cv::rectangle(canvas, res.box, color, 2);
+                        cv::rectangle(canvas, res.box, color, thickness);
 
                         // Draw label and confidence
                         std::string label = "Class " + std::to_string(res.class_id) + " " + std::to_string(static_cast<int>(res.confidence * 100)) + "%";
                         int baseLine;
-                        cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+                        cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, font_scale, std::max(1, thickness/2), &baseLine);
                         cv::rectangle(canvas, cv::Rect(res.box.x, res.box.y - labelSize.height - 5, labelSize.width, labelSize.height + 5), color, cv::FILLED);
-                        cv::putText(canvas, label, cv::Point(res.box.x, res.box.y - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+                        cv::putText(canvas, label, cv::Point(res.box.x, res.box.y - 5), cv::FONT_HERSHEY_SIMPLEX, font_scale, cv::Scalar(255, 255, 255), std::max(1, thickness/2));
                     }
 
                     std::string filename = entry.path().filename().string();

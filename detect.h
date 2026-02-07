@@ -78,6 +78,7 @@ namespace yolo
         cv::Size m_model_output_shape_seg;
         cv::Point2f m_scale_factor;
         int m_segment_channel{32};
+        static constexpr int m_stride = 32;
 
         cv::Mat m_resized_frame;
         cv::Mat m_input_blob;
