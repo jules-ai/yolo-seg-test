@@ -4,18 +4,20 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <string>
+#include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <input_dir> <output_dir> <model_path>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <model_path> <input_dir> <output_dir>" << std::endl;
         return -1;
     }
 
-    std::string input_dir = argv[1];
-    std::string output_dir = argv[2];
-    std::string model_path = argv[3];
+    std::string model_path = argv[1];
+    std::string input_dir = argv[2];
+    std::string output_dir = argv[3];
 
     if (!fs::exists(output_dir)) {
         fs::create_directories(output_dir);
@@ -42,7 +44,8 @@ int main(int argc, char** argv) {
         if (entry.is_regular_file()) {
             std::string path = entry.path().string();
             std::string ext = entry.path().extension().string();
-            if (ext == ".jpg" || ext == ".png" || ext == ".jpeg" || ext == ".JPG" || ext == ".PNG") {
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (ext == ".jpg" || ext == ".png" || ext == ".jpeg" || ext == ".bmp") {
                 cv::Mat frame = cv::imread(path);
                 if (frame.empty()) {
                     std::cerr << "Failed to read image: " << path << std::endl;
