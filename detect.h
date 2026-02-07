@@ -45,7 +45,15 @@ namespace yolo
             LAYOUT = 2,
         };
 
-        Detector(const float confidence_threshold, const float NMS_threshold, const cv::Size input_shape = cv::Size(640, 640));
+        enum class PreprocessingMethod
+        {
+            LETTERBOX,
+            RESIZE,
+            RECT,
+        };
+
+        Detector(float confidence_threshold, float NMS_threshold, int imgsz, PreprocessingMethod method = PreprocessingMethod::LETTERBOX);
+        Detector(float confidence_threshold, float NMS_threshold, cv::Size input_shape = cv::Size(640, 640), PreprocessingMethod method = PreprocessingMethod::LETTERBOX);
         ~Detector() = default;
 
         int InitVino(const std::string &model_path);
@@ -57,7 +65,6 @@ namespace yolo
         std::vector<Result> postProcessing(const cv::Mat &frame, Order order = Order::NONE);
         cv::Rect scaleBoundingBox(const cv::Rect2d &src) const;
 
-        void setupPreprocessing(ov::preprocess::PrePostProcessor &ppp);
         void setupModelOutputShape(std::shared_ptr<const ov::Model> model);
 
         ov::Core ov_core;
@@ -77,7 +84,7 @@ namespace yolo
 
         float m_confidence_threshold;
         float m_NMS_threshold;
-        bool m_keep_ratio{true};
+        PreprocessingMethod m_preprocessing_method;
     };
 
 } // namespace yolo

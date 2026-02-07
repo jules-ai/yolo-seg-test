@@ -1,41 +1,23 @@
 #include "detect.h"
-#include "dencryptor.h"
 #include <memory>
-#include <random>
 #include <iostream>
 #include <vector>
-#include <fstream>
-#include "macro_def.h"
-
 #include "auxi_funcs.hpp"
-#include <blake3.h>
-#include <filesystem>
-#ifdef _WIN32
-namespace fs = std::filesystem;
-#else
-namespace fs = std::__fs::filesystem;
-#endif
+
 namespace yolo
 {
-    static std::string hash(const char *data, size_t size)
-    {
-        blake3_hasher hasher;
-        uint8_t output[BLAKE3_OUT_LEN];
-        blake3_hasher_init(&hasher);
-        blake3_hasher_update(&hasher, data, size);
-        blake3_hasher_finalize(&hasher, output, BLAKE3_OUT_LEN);
-        static constexpr char hex[] = "0123456789abcdef";
-        std::string result(BLAKE3_OUT_LEN, '\0');
-        for (size_t i = 0; i < BLAKE3_OUT_LEN / 2; i++)
-        {
-            result[2 * i] = hex[output[i] >> 4];
-            result[2 * i + 1] = hex[output[i] & 0x0F];
-        }
-        return result;
-    }
     int Detector::InitVino(const std::string &model_path)
     {
-        std::shared_ptr<ov::Model> model = ov_core.read_model(model_path);
+        std::shared_ptr<ov::Model> model;
+        try
+        {
+            model = ov_core.read_model(model_path);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught exception: " << e.what() << std::endl;
+            return UNKNOWN_ERROR;
+        }
 
         // Get input shape from the model
         const std::vector<ov::Output<ov::Node>> inputs = model->inputs();
@@ -45,8 +27,15 @@ namespace yolo
             m_model_input_shape = cv::Size(static_cast<int>(input_shape[3].get_length()), static_cast<int>(input_shape[2].get_length()));
         }
 
-        // Support dynamic shapes
-        model->reshape({1, 3, ov::Dimension(), ov::Dimension()});
+        // Support dynamic shapes only for RECT
+        if (m_preprocessing_method == PreprocessingMethod::RECT)
+        {
+            model->reshape({1, 3, ov::Dimension(), ov::Dimension()});
+        }
+        else
+        {
+            model->reshape({1, 3, static_cast<size_t>(m_model_input_shape.height), static_cast<size_t>(m_model_input_shape.width)});
+        }
 
         try
         {
@@ -55,17 +44,17 @@ namespace yolo
         }
         catch (const ov::Exception &e)
         {
-            std::cerr << "Caught ov::Exception : " << e.what() << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught ov::Exception : " << e.what() << std::endl;
             return UNKNOWN_ERROR;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Caught const std::exception : " << e.what() << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught const std::exception : " << e.what() << std::endl;
             return UNKNOWN_ERROR;
         }
         catch (...)
         {
-            std::cerr << "Caught Unknown exception " << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught Unknown exception " << std::endl;
             return UNKNOWN_ERROR;
         }
 
@@ -73,11 +62,16 @@ namespace yolo
         return SUCCESS;
     }
 
-    Detector::Detector(const float confidence_threshold, const float NMS_threshold, const cv::Size input_shape)
+    Detector::Detector(float confidence_threshold, float NMS_threshold, int imgsz, PreprocessingMethod method)
+        : Detector(confidence_threshold, NMS_threshold, cv::Size(imgsz, imgsz), method)
+    {
+    }
+    Detector::Detector(float confidence_threshold, float NMS_threshold, cv::Size input_shape, PreprocessingMethod method)
     {
         m_confidence_threshold = confidence_threshold;
         m_NMS_threshold = NMS_threshold;
         m_model_input_shape = input_shape;
+        m_preprocessing_method = method;
     }
     StatusCode Detector::Detect(const cv::Mat &frame, std::vector<Result> &results, Order order /*= Order::NONE*/)
     {
@@ -88,17 +82,17 @@ namespace yolo
         }
         catch (const ov::Exception &e)
         {
-            std::cerr << "Caught ov::Exception : " << e.what() << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught ov::Exception : " << e.what() << std::endl;
             return StatusCode::INFERENCE_ERROR;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Caught std::exception : " << e.what() << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught std::exception : " << e.what() << std::endl;
             return StatusCode::INFERENCE_ERROR;
         }
         catch (...)
         {
-            std::cerr << "Caught Unknown exception " << std::endl;
+            std::cerr << "[" << __FILE__ << ":" << __LINE__ << "] Caught Unknown exception " << std::endl;
             return StatusCode::INFERENCE_ERROR;
         }
         results = postProcessing(frame, order);
@@ -111,21 +105,45 @@ namespace yolo
         int target_w = m_model_input_shape.width;
         int target_h = m_model_input_shape.height;
 
-        if (m_keep_ratio)
+        if (m_preprocessing_method == PreprocessingMethod::RECT)
         {
             float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
             target_w = static_cast<int>(std::round(frame.cols * scale / 32) * 32);
             target_h = static_cast<int>(std::round(frame.rows * scale / 32) * 32);
-        }
-        if (target_w < 32)
-            target_w = 32;
-        if (target_h < 32)
-            target_h = 32;
+            if (target_w < 32)
+                target_w = 32;
+            if (target_h < 32)
+                target_h = 32;
 
-        cv::resize(frame, m_resized_frame, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
-        m_scale_factor.x = static_cast<float>(frame.cols) / target_w;
-        m_scale_factor.y = static_cast<float>(frame.rows) / target_h;
-        m_input_resized_roi = cv::Rect(0, 0, target_w, target_h);
+            cv::resize(frame, m_resized_frame, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
+            m_scale_factor.x = static_cast<float>(frame.cols) / target_w;
+            m_scale_factor.y = static_cast<float>(frame.rows) / target_h;
+            m_input_resized_roi = cv::Rect(0, 0, target_w, target_h);
+        }
+        else if (m_preprocessing_method == PreprocessingMethod::LETTERBOX)
+        {
+            float scale = std::min(static_cast<float>(target_w) / frame.cols, static_cast<float>(target_h) / frame.rows);
+            int resized_w = static_cast<int>(frame.cols * scale);
+            int resized_h = static_cast<int>(frame.rows * scale);
+
+            cv::Mat resized;
+            cv::resize(frame, resized, cv::Size(resized_w, resized_h), 0, 0, cv::INTER_AREA);
+
+            auto bg_color = mode_color(frame);
+            m_resized_frame = cv::Mat(cv::Size(target_w, target_h), frame.type(), bg_color);
+            resized.copyTo(m_resized_frame(cv::Rect(0, 0, resized_w, resized_h)));
+
+            m_scale_factor.x = 1.0f / scale;
+            m_scale_factor.y = 1.0f / scale;
+            m_input_resized_roi = cv::Rect(0, 0, resized_w, resized_h);
+        }
+        else // RESIZE
+        {
+            cv::resize(frame, m_resized_frame, cv::Size(target_w, target_h), 0, 0, cv::INTER_AREA);
+            m_scale_factor.x = static_cast<float>(frame.cols) / target_w;
+            m_scale_factor.y = static_cast<float>(frame.rows) / target_h;
+            m_input_resized_roi = cv::Rect(0, 0, target_w, target_h);
+        }
 
         if (!m_resized_frame.isContinuous())
             m_resized_frame = m_resized_frame.clone();
@@ -219,14 +237,13 @@ namespace yolo
         cv::vconcat(mask_coefs, mask_coef_mat);
         cv::Mat masks = mask_coef_mat * segment_outputs;
 
-        float col = static_cast<float>(frame.cols);
-        float row = static_cast<float>(frame.rows);
-        float scale = std::min(m_model_output_shape_seg.width / col, m_model_output_shape_seg.height / row);
-        // m_scale_factor.x = 1.0f / scale;
-        // m_scale_factor.y = 1.0f / scale;
-        int resized_w = static_cast<int>(col * scale);
-        int resized_h = static_cast<int>(row * scale);
-        auto roi_seg = cv::Rect(0, 0, resized_w, resized_h);
+        float seg_scale_x = static_cast<float>(m_model_output_shape_seg.width) / m_resized_frame.cols;
+        float seg_scale_y = static_cast<float>(m_model_output_shape_seg.height) / m_resized_frame.rows;
+        auto roi_seg = cv::Rect(
+            static_cast<int>(m_input_resized_roi.x * seg_scale_x),
+            static_cast<int>(m_input_resized_roi.y * seg_scale_y),
+            static_cast<int>(m_input_resized_roi.width * seg_scale_x),
+            static_cast<int>(m_input_resized_roi.height * seg_scale_y));
         for (int i = 0; i < NMS_ids.size(); ++i)
         {
             cv::Mat mask(m_model_output_shape_seg, CV_32FC1, (float *)masks.data + i * m_model_output_shape_seg.area());
@@ -270,12 +287,6 @@ namespace yolo
         return results;
     }
 
-    void Detector::setupPreprocessing(ov::preprocess::PrePostProcessor &ppp)
-    {
-        ppp.input().tensor().set_element_type(ov::element::u8).set_layout("NHWC").set_color_format(ov::preprocess::ColorFormat::BGR);
-        ppp.input().preprocess().convert_element_type(ov::element::f32).convert_color(ov::preprocess::ColorFormat::RGB).scale({255, 255, 255});
-        ppp.input().model().set_layout("NCHW");
-    }
 
     void Detector::setupModelOutputShape(std::shared_ptr<const ov::Model> model)
     {
