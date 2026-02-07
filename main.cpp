@@ -6,6 +6,8 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -29,6 +31,9 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to initialize detector with model: " << model_path << std::endl;
         return -1;
     }
+
+    // Class names mapping
+    std::vector<std::string> class_names = {"Background", "Photo", "Layout"};
 
     // Different colors for different classes
     std::vector<cv::Scalar> colors = {
@@ -56,8 +61,8 @@ int main(int argc, char** argv) {
                 if (detector.Detect(frame, results) == yolo::SUCCESS) {
                     cv::Mat canvas = frame.clone();
 
-                    int thickness = std::max(1, static_cast<int>(frame.cols / 300));
-                    double font_scale = frame.cols / 1000.0;
+                    int thickness = std::max(1, static_cast<int>(frame.cols / 600));
+                    double font_scale = frame.cols / 2000.0;
 
                     int photo_count = 0;
                     int layout_count = 0;
@@ -79,7 +84,11 @@ int main(int argc, char** argv) {
                         cv::rectangle(canvas, res.box, color, thickness);
 
                         // Draw label and confidence
-                        std::string label = "Class " + std::to_string(res.class_id) + " " + std::to_string(static_cast<int>(res.confidence * 100)) + "%";
+                        std::string class_name = res.class_id < class_names.size() ? class_names[res.class_id] : "Class " + std::to_string(res.class_id);
+                        std::stringstream ss;
+                        ss << class_name << " " << std::fixed << std::setprecision(2) << res.confidence;
+                        std::string label = ss.str();
+
                         int baseLine;
                         cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, font_scale, std::max(1, thickness/2), &baseLine);
                         cv::rectangle(canvas, cv::Rect(res.box.x, res.box.y - labelSize.height - 5, labelSize.width, labelSize.height + 5), color, cv::FILLED);
